@@ -1,0 +1,121 @@
+# Rendered by soolmuk/goose-recipes scripts/render.py - do not hand-edit.
+name: goose AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: goose-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  goose-review:
+    name: goose AI Code Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install goose CLI
+        run: |
+          curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \
+            | GOOSE_VERSION=v1.48.0 CONFIGURE=false GOOSE_BIN_DIR=/home/runner/.local/bin bash
+          echo "/home/runner/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure goose
+        run: |
+          mkdir -p ~/.config/goose
+          cat <<'EOF' > ~/.config/goose/config.yaml
+          GOOSE_PROVIDER: ollama_cloud
+          GOOSE_MODEL: glm-5.3-flash
+          keyring: false
+          EOF
+
+      - name: Gather PR information
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "# Pull Request"
+            gh pr view "${{ github.event.pull_request.number }}"
+            echo ""
+            echo "# Files Changed"
+            gh pr diff "${{ github.event.pull_request.number }}" --name-only
+            echo ""
+            echo "# Changes (diff)"
+            gh pr diff "${{ github.event.pull_request.number }}"
+          } > changes.txt
+
+      - name: Write instructions
+        run: |
+          cat <<'EOF' > instructions.txt
+          Review the code changes from the pull request / merge request.
+          
+          ## Review scope
+          - Correctness bugs, security issues, performance problems, design flaws.
+          - Be precise; cite exact file paths / line numbers and explain the failure mode.
+          - Search the codebase (e.g. rg) before claiming something is missing.
+          - Silent error paths, unhandled Result returns, resource lifecycle,
+            concurrency hazards, tests that do not test real behavior.
+          
+          ## Issue Categories
+          - 🔴 BLOCKING: must fix before merge; HIGH confidence + file:line evidence.
+          - 🟡 WARNING: should fix; MEDIUM+ confidence.
+          - 🟢 SUGGESTION: nice to have; label speculation.
+          - ✅ HIGHLIGHT: good practices worth acknowledging.
+          
+          ## Anti-hallucination rules
+          - Search before claiming something is "missing".
+          - Say "I couldn't verify" rather than asserting something is wrong.
+          - Do NOT run build/test/format commands and do NOT modify files. Read-only review.
+          - Don't provide any session or logging details. Don't mention extensions at all.
+          
+          ## Output format (omit empty sections)
+          Begin your final answer with the single line `## Summary` and nothing before it.
+          Write all review prose in Korean.
+          Always keep the category headers in English exactly as written:
+          ## Summary | ## 🔴 Blocking Issues | ## 🟡 Warnings | ## 🟢 Suggestions |
+          ## ✅ Highlights | ## Verdict - only the explanation text under each
+          heading is written in Korean.
+          Verdict: APPROVE | REQUEST_CHANGES - REQUEST_CHANGES only if at least one Blocking
+          issue; otherwise one short sentence.
+          
+          The changes to review are:
+          EOF
+          cat changes.txt >> instructions.txt
+
+      - name: Run goose
+        env:
+          OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
+        run: |
+          goose run --instructions instructions.txt > raw.txt
+          awk '/^## Summary/{found=1} found' raw.txt | sed -E 's/\x1B\[[0-9;]*[mK]//g' > body.md || true
+          if [ ! -s body.md ]; then
+            echo "goose produced no final review (no '## Summary' sentinel in output)" >&2
+            tail -n 40 raw.txt >&2 || true
+            exit 1
+          fi
+
+      - name: Post review to PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          b = open('body.md','rb').read()
+          if len(b) > 55000:
+              open('body.md','wb').write(b[:55000] + b'\n\n*(truncated by CI: body exceeded the 55,000-byte limit)*'.encode())
+          PY
+          if [ -s body.md ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file body.md
+          else
+            echo "empty review body" >&2
+            exit 1
+          fi
