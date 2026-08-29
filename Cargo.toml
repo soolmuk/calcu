@@ -1,0 +1,10 @@
+[package]
+name = "calcu"
+version = "0.1.0"
+edition = "2021"
+description = "공학용 계산기 (Rust + egui)"
+
+[dependencies]
+eframe = "0.28"
+
+[workspace]
