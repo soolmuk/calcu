@@ -28,12 +28,15 @@ fn main() -> eframe::Result {
     )
 }
 
-// ─── 한글 폰트 (macOS 시스템 폰트) ──────────────────────────────
+// ─── 한글 폰트 (플랫폼별 시스템 폰트 폴백) ──────────────────────
 
 fn install_fonts(ctx: &egui::Context) {
     const CANDIDATES: &[&str] = &[
         "/System/Library/Fonts/AppleSDGothicNeo.ttc",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "C:\\Windows\\Fonts\\malgun.ttf",
     ];
     let mut fonts = FontDefinitions::default();
     for path in CANDIDATES {
@@ -85,6 +88,16 @@ impl CalculatorApp {
         self.error = None;
     }
 
+    fn push_history(&mut self, entry: HistoryEntry) {
+        // 기록 상한: 오래된 항목부터 제거해 무한 증가를 막는다.
+        const MAX_HISTORY: usize = 100;
+        self.history.push(entry);
+        if self.history.len() > MAX_HISTORY {
+            let overflow = self.history.len() - MAX_HISTORY;
+            self.history.drain(0..overflow);
+        }
+    }
+
     fn backspace(&mut self) {
         self.expr.pop();
         self.error = None;
@@ -102,8 +115,9 @@ impl CalculatorApp {
         match evaluate(&self.expr, self.angle_mode == AngleMode::Deg) {
             Ok(v) => {
                 let result = eval::fmt_value(v);
-                self.history.push(HistoryEntry {
-                    expr: std::mem::take(&mut self.expr),
+                let expr = std::mem::take(&mut self.expr);
+                self.push_history(HistoryEntry {
+                    expr,
                     result: result.clone(),
                 });
                 self.expr = result;
@@ -165,12 +179,16 @@ impl eframe::App for CalculatorApp {
         let deg = self.angle_mode == AngleMode::Deg;
 
         egui::TopBottomPanel::top("display").show(ctx, |ui| {
-            ui.add_sized(
+            let resp = ui.add_sized(
                 [ui.available_width(), 34.0],
                 egui::TextEdit::singleline(&mut self.expr)
                     .font(egui::TextStyle::Monospace)
                     .hint_text("수식을 입력하세요 (예: sin(30)+2^10)"),
             );
+            // 키보드로 직접 입력했을 때도 오래된 오류 라벨이 남지 않도록 한다.
+            if resp.changed() {
+                self.error = None;
+            }
             ui.add_space(4.0);
 
             // 오류 또는 실시간 미리보기
@@ -196,9 +214,11 @@ impl eframe::App for CalculatorApp {
             ui.horizontal(|ui| {
                 if ui.selectable_label(self.angle_mode == AngleMode::Deg, "DEG").clicked() {
                     self.angle_mode = AngleMode::Deg;
+                    self.error = None;
                 }
                 if ui.selectable_label(self.angle_mode == AngleMode::Rad, "RAD").clicked() {
                     self.angle_mode = AngleMode::Rad;
+                    self.error = None;
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("기록 지우기").clicked() {
@@ -209,10 +229,17 @@ impl eframe::App for CalculatorApp {
             ui.add_space(2.0);
         });
 
+        // Enter 키로 계산 (디스플레이 TextEdit가 포커스를 가져가지 않은 경우 대비해 전역 폴링)
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.calculate();
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             for row in KEYS {
                 ui.horizontal(|ui| {
-                    let bw = (ui.available_width() - 6.0 * (row.len() as f32 - 1.0))
+                    // 버튼 사이 실제 간격은 egui item_spacing을 따라간다 (기본 8.0px).
+                    let gap = ui.style().spacing.item_spacing.x;
+                    let bw = (ui.available_width() - gap * (row.len() as f32 - 1.0))
                         / row.len() as f32;
                     for key in *row {
                         let b = Button::new(RichText::new(key.label).size(15.0))
@@ -236,29 +263,30 @@ impl eframe::App for CalculatorApp {
                 ui.separator();
                 ui.label(RichText::new("기록").strong());
                 egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                    let entries: Vec<(String, String)> = self
-                        .history
-                        .iter()
-                        .rev()
-                        .map(|e| (e.expr.clone(), e.result.clone()))
-                        .collect();
-                    for (expr, result) in entries {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&expr).size(11.0).weak());
-                            if ui
-                                .add(
+                    // 클릭 시 entry.result 삽입이 필요하므로 인덱스로 접근(borrow 충돌 회피)
+                    let last = self.history.len();
+                    for i in (0..last).rev() {
+                        // 문자열을 복제하지 않고 참조로 렌더링한다. 클릭 결과만
+                        // 클로저 밖으로 반환해, 클릭 시에만 소유값을 만든다(NLL).
+                        let entry = &self.history[i];
+                        let clicked = ui
+                            .horizontal(|ui| {
+                                ui.label(RichText::new(entry.expr.as_str()).size(11.0).weak());
+                                ui.add(
                                     Label::new(
-                                        RichText::new(&result)
+                                        RichText::new(entry.result.as_str())
                                             .strong()
                                             .color(Color32::from_rgb(120, 200, 255)),
                                     )
                                     .sense(Sense::click()),
                                 )
                                 .clicked()
-                            {
-                                self.insert(&result);
-                            }
-                        });
+                            })
+                            .inner;
+                        if clicked {
+                            let result = self.history[i].result.clone();
+                            self.insert(&result);
+                        }
                     }
                 });
             }

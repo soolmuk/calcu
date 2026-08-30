@@ -26,8 +26,11 @@ jobs:
 
       - name: Install goose CLI
         run: |
-          curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \
-            | GOOSE_VERSION=v1.48.0 CONFIGURE=false GOOSE_BIN_DIR=/home/runner/.local/bin bash
+          # supply chain 보호: 다운로드 스크립트를 체크섬으로 고정한 뒤 실행한다.
+          curl -fsSL -o /tmp/download_cli.sh \
+            https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh
+          echo "ab5ae40513348ec4e6047cc7338040aab2df5246800c111d22065766ba6013f0  /tmp/download_cli.sh" | sha256sum -c -
+          GOOSE_VERSION=v1.48.0 CONFIGURE=false GOOSE_BIN_DIR=/home/runner/.local/bin bash /tmp/download_cli.sh
           echo "/home/runner/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure goose
@@ -111,7 +114,9 @@ jobs:
           python3 - <<'PY'
           b = open('body.md','rb').read()
           if len(b) > 55000:
-              open('body.md','wb').write(b[:55000] + b'\n\n*(truncated by CI: body exceeded the 55,000-byte limit)*'.encode())
+              # UTF-8 멀티바이트 경계에서 잘리지 않도록 무효 바이트를 제거한 후 저장한다.
+              safe = b[:55000].decode('utf-8', errors='ignore')
+              open('body.md','wb').write(safe.encode('utf-8') + b'\n\n*(truncated by CI: body exceeded the 55,000-byte limit)*')
           PY
           if [ -s body.md ]; then
             gh pr comment "${{ github.event.pull_request.number }}" --body-file body.md
