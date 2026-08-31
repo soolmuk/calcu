@@ -25,3 +25,6 @@ src/
 ├── main.rs   # GUI (egui)
 └── eval.rs   # 수식 엔진 (토크나이저 + 파서 + 평가기)
 ```
+## Smoke
+
+v0.2.0 recipe-setup + fireworks/deepseek-v4 run.
